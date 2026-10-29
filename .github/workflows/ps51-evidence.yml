@@ -1,0 +1,105 @@
+name: ps51-evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    runs-on: windows-latest
+    env:
+      BASE_SHA: c6a4c18f1d01a8bec241c618eb6dfea952508744
+      FIX_SHA: a83c3676
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Windows PowerShell version
+        shell: powershell
+        run: |
+          Write-Output '=== $PSVersionTable ==='
+          $PSVersionTable | Format-Table -AutoSize | Out-String -Width 200 | Write-Output
+          Write-Output ('PSEdition: ' + $PSVersionTable.PSEdition)
+          Write-Output ('PSVersion: ' + $PSVersionTable.PSVersion)
+          Write-Output ('powershell.exe: ' + (Get-Command powershell.exe).Source)
+          git --version
+
+      - name: Prepare before/after trees
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          git worktree add --detach "$env:RUNNER_TEMP\before-tree" $env:BASE_SHA 2>&1 | Out-String | Write-Output
+          Write-Output "before tree: $(git -C "$env:RUNNER_TEMP\before-tree" rev-parse HEAD)"
+          Write-Output "after tree:  $(git rev-parse $env:FIX_SHA)"
+          git diff $env:BASE_SHA $env:FIX_SHA -- extensions/git/scripts/powershell/create-new-feature-branch.ps1
+
+      - name: Run regression cases under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $roots = [ordered]@{
+            'BEFORE' = @{ Root = "$env:RUNNER_TEMP\before-tree"; Sha = $env:BASE_SHA }
+            'AFTER'  = @{ Root = "$env:GITHUB_WORKSPACE"; Sha = (git rev-parse $env:FIX_SHA) }
+          }
+
+          function New-Project([string]$src, [string]$name) {
+            $p = Join-Path $env:RUNNER_TEMP $name
+            if (Test-Path $p) { Remove-Item -Recurse -Force $p }
+            New-Item -ItemType Directory -Force -Path (Join-Path $p 'scripts\powershell') | Out-Null
+            New-Item -ItemType Directory -Force -Path (Join-Path $p '.specify\templates') | Out-Null
+            $ext = Join-Path $p '.specify\extensions\git\scripts\powershell'
+            New-Item -ItemType Directory -Force -Path $ext | Out-Null
+            Copy-Item (Join-Path $src 'scripts\powershell\common.ps1') (Join-Path $p 'scripts\powershell\common.ps1')
+            Copy-Item (Join-Path $src 'extensions\git\scripts\powershell\*') $ext
+            Copy-Item (Join-Path $src 'extensions\git\extension.yml') (Join-Path $p '.specify\extensions\git\extension.yml')
+            Push-Location $p
+            git init -q -b main
+            git config user.email test@example.com
+            git config user.name 'Test User'
+            git commit --allow-empty -q -m seed
+            Pop-Location
+            return $p
+          }
+
+          function Show([string]$cmd) { Write-Output "PS> $cmd" ; Invoke-Expression $cmd }
+
+          function Invoke-Case([string]$label, [string]$proj, [string]$override) {
+            Push-Location $proj
+            Write-Output "HEAD before: $(git rev-parse --abbrev-ref HEAD)"
+            Write-Output "PS> `$env:GIT_BRANCH_NAME = '$override'"
+            $env:GIT_BRANCH_NAME = $override
+            $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\.specify\extensions\git\scripts\powershell\create-new-feature-branch.ps1 -Json -ShortName login 'Login page'"
+            Write-Output "PS> $cmd"
+            $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\.specify\extensions\git\scripts\powershell\create-new-feature-branch.ps1 -Json -ShortName login 'Login page' 2>&1 | ForEach-Object { "$_" }
+            $code = $LASTEXITCODE
+            Remove-Item Env:\GIT_BRANCH_NAME
+            Write-Output '--- output (stdout+stderr) ---'
+            $out | ForEach-Object { Write-Output $_ }
+            Write-Output '--- end output ---'
+            Write-Output "exit code: $code"
+            Write-Output "HEAD after:  $(git rev-parse --abbrev-ref HEAD)"
+            Pop-Location
+          }
+
+          foreach ($k in $roots.Keys) {
+            $r = $roots[$k]
+            Write-Output ''
+            Write-Output "=== $k ($($r.Sha.Substring(0,8))) case A: override naming the current branch ==="
+            $proj = New-Project $r.Root "$k-caseA"
+            Push-Location $proj
+            Show 'git checkout -q -b feature/PROJ-42-login'
+            Pop-Location
+            Invoke-Case "$k A" $proj 'feature/PROJ-42-login'
+
+            Write-Output ''
+            Write-Output "=== $k ($($r.Sha.Substring(0,8))) case B: override naming a different existing branch ==="
+            $proj = New-Project $r.Root "$k-caseB"
+            Push-Location $proj
+            Show 'git branch feature/other'
+            Pop-Location
+            Invoke-Case "$k B" $proj 'feature/other'
+          }
+          exit 0
