@@ -2,6 +2,9 @@ name: ps51-evidence
 
 on:
   workflow_dispatch:
+  push:
+    branches: [claude/5003-ps51-evidence]
+    paths: [.github/workflows/ps51-evidence.yml]
 
 permissions:
   contents: read
