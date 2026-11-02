@@ -29,6 +29,16 @@ CORE_COMMON_SH = PROJECT_ROOT / "scripts" / "bash" / "common.sh"
 CORE_COMMON_PS = PROJECT_ROOT / "scripts" / "powershell" / "common.ps1"
 
 HAS_PWSH = shutil.which("pwsh") is not None
+HAS_WINDOWS_POWERSHELL = os.name == "nt" and shutil.which("powershell") is not None
+# CONTRIBUTING.md requires the PowerShell scripts to target Windows PowerShell 5.1, so behavioral
+# changes to them are exercised under that runtime too where it exists (CI's windows-latest runners).
+POWERSHELL_RUNTIMES = [
+    "pwsh",
+    pytest.param(
+        "powershell",
+        marks=pytest.mark.skipif(not HAS_WINDOWS_POWERSHELL, reason="Windows PowerShell 5.1 not available"),
+    ),
+]
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -122,12 +132,18 @@ def _run_bash(script_name: str, cwd: Path, *args: str, env_extra: dict | None = 
     )
 
 
-def _run_pwsh(script_name: str, cwd: Path, *args: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
-    """Run an extension PowerShell script."""
+def _run_pwsh(
+    script_name: str, cwd: Path, *args: str, env_extra: dict | None = None, shell: str = "pwsh"
+) -> subprocess.CompletedProcess:
+    """Run an extension PowerShell script under `pwsh`, or under Windows PowerShell 5.1 (`powershell`)."""
     script = cwd / ".specify" / "extensions" / "git" / "scripts" / "powershell" / script_name
     env = {**os.environ, **_GIT_ENV, **(env_extra or {})}
+    command = [shell, "-NoProfile"]
+    if shell == "powershell":
+        # Windows PowerShell 5.1 applies the machine execution policy to -File; pwsh does not need this.
+        command += ["-ExecutionPolicy", "Bypass"]
     return subprocess.run(
-        ["pwsh", "-NoProfile", "-File", str(script), *args],
+        [*command, "-File", str(script), *args],
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -942,7 +958,8 @@ class TestCreateFeaturePowerShell:
         assert data["BRANCH_NAME"] == "jdoe/2026-app/042-custom-branch"
         assert data["FEATURE_NUM"] == "042"
 
-    def test_git_branch_name_override_naming_current_branch_is_noop(self, tmp_path: Path):
+    @pytest.mark.parametrize("shell", POWERSHELL_RUNTIMES)
+    def test_git_branch_name_override_naming_current_branch_is_noop(self, tmp_path: Path, shell: str):
         """PowerShell GIT_BRANCH_NAME equal to the checked-out branch exits 0 without switching."""
         project = _setup_project(tmp_path)
         subprocess.run(
@@ -953,6 +970,7 @@ class TestCreateFeaturePowerShell:
             "create-new-feature-branch.ps1", project,
             "-Json", "-ShortName", "login", "Login page",
             env_extra={"GIT_BRANCH_NAME": "feature/PROJ-42-login"},
+            shell=shell,
         )
 
         assert result.returncode == 0, result.stderr
@@ -964,7 +982,8 @@ class TestCreateFeaturePowerShell:
         ).stdout.strip()
         assert head == "feature/PROJ-42-login"
 
-    def test_git_branch_name_override_naming_other_existing_branch_fails(self, tmp_path: Path):
+    @pytest.mark.parametrize("shell", POWERSHELL_RUNTIMES)
+    def test_git_branch_name_override_naming_other_existing_branch_fails(self, tmp_path: Path, shell: str):
         """PowerShell GIT_BRANCH_NAME naming a different existing branch is rejected without switching."""
         project = _setup_project(tmp_path)
         subprocess.run(["git", "branch", "feature/other"], cwd=project, check=True)
@@ -976,6 +995,7 @@ class TestCreateFeaturePowerShell:
             "create-new-feature-branch.ps1", project,
             "-Json", "-ShortName", "login", "Login page",
             env_extra={"GIT_BRANCH_NAME": "feature/other"},
+            shell=shell,
         )
 
         assert result.returncode == 1
