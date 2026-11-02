@@ -30,8 +30,7 @@ CORE_COMMON_PS = PROJECT_ROOT / "scripts" / "powershell" / "common.ps1"
 
 HAS_PWSH = shutil.which("pwsh") is not None
 HAS_WINDOWS_POWERSHELL = os.name == "nt" and shutil.which("powershell") is not None
-# CONTRIBUTING.md requires the PowerShell scripts to target Windows PowerShell 5.1, so behavioral
-# changes to them are exercised under that runtime too where it exists (CI's windows-latest runners).
+# CONTRIBUTING.md targets Windows PowerShell 5.1; run the changed behavior under it too where it exists.
 POWERSHELL_RUNTIMES = [
     "pwsh",
     pytest.param(
@@ -133,14 +132,14 @@ def _run_bash(script_name: str, cwd: Path, *args: str, env_extra: dict | None = 
 
 
 def _run_pwsh(
-    script_name: str, cwd: Path, *args: str, env_extra: dict | None = None, shell: str = "pwsh"
+    script_name: str, cwd: Path, *args: str, env_extra: dict | None = None, exe: str = "pwsh"
 ) -> subprocess.CompletedProcess:
-    """Run an extension PowerShell script under `pwsh`, or under Windows PowerShell 5.1 (`powershell`)."""
+    """Run an extension PowerShell script with `exe` (pwsh, or Windows PowerShell 5.1)."""
     script = cwd / ".specify" / "extensions" / "git" / "scripts" / "powershell" / script_name
     env = {**os.environ, **_GIT_ENV, **(env_extra or {})}
-    command = [shell, "-NoProfile"]
-    if shell == "powershell":
-        # Windows PowerShell 5.1 applies the machine execution policy to -File; pwsh does not need this.
+    command = [exe, "-NoProfile"]
+    if exe == "powershell":
+        # Windows PowerShell 5.1 defaults to Restricted on client Windows and refuses -File; pwsh defaults to RemoteSigned.
         command += ["-ExecutionPolicy", "Bypass"]
     return subprocess.run(
         [*command, "-File", str(script), *args],
@@ -958,8 +957,8 @@ class TestCreateFeaturePowerShell:
         assert data["BRANCH_NAME"] == "jdoe/2026-app/042-custom-branch"
         assert data["FEATURE_NUM"] == "042"
 
-    @pytest.mark.parametrize("shell", POWERSHELL_RUNTIMES)
-    def test_git_branch_name_override_naming_current_branch_is_noop(self, tmp_path: Path, shell: str):
+    @pytest.mark.parametrize("exe", POWERSHELL_RUNTIMES)
+    def test_git_branch_name_override_naming_current_branch_is_noop(self, tmp_path: Path, exe: str):
         """PowerShell GIT_BRANCH_NAME equal to the checked-out branch exits 0 without switching."""
         project = _setup_project(tmp_path)
         subprocess.run(
@@ -970,7 +969,7 @@ class TestCreateFeaturePowerShell:
             "create-new-feature-branch.ps1", project,
             "-Json", "-ShortName", "login", "Login page",
             env_extra={"GIT_BRANCH_NAME": "feature/PROJ-42-login"},
-            shell=shell,
+            exe=exe,
         )
 
         assert result.returncode == 0, result.stderr
@@ -982,8 +981,8 @@ class TestCreateFeaturePowerShell:
         ).stdout.strip()
         assert head == "feature/PROJ-42-login"
 
-    @pytest.mark.parametrize("shell", POWERSHELL_RUNTIMES)
-    def test_git_branch_name_override_naming_other_existing_branch_fails(self, tmp_path: Path, shell: str):
+    @pytest.mark.parametrize("exe", POWERSHELL_RUNTIMES)
+    def test_git_branch_name_override_naming_other_existing_branch_fails(self, tmp_path: Path, exe: str):
         """PowerShell GIT_BRANCH_NAME naming a different existing branch is rejected without switching."""
         project = _setup_project(tmp_path)
         subprocess.run(["git", "branch", "feature/other"], cwd=project, check=True)
@@ -995,11 +994,12 @@ class TestCreateFeaturePowerShell:
             "create-new-feature-branch.ps1", project,
             "-Json", "-ShortName", "login", "Login page",
             env_extra={"GIT_BRANCH_NAME": "feature/other"},
-            shell=shell,
+            exe=exe,
         )
 
         assert result.returncode == 1
-        assert "already exists" in result.stderr
+        # Windows PowerShell 5.1 word-wraps the error record to the console width
+        assert "already exists" in " ".join(result.stderr.split()), result.stderr
         head = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=project, capture_output=True, text=True, check=True,
